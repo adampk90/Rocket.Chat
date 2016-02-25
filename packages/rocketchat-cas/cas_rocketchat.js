@@ -1,8 +1,11 @@
+var https = Npm.require('https');
+
 Meteor.startup(function(){
     RocketChat.settings.addGroup('CAS', function() {
         this.add("CAS_enabled", false, { type: 'boolean', group: 'CAS', public: true });
         this.add("CAS_base_url" , '' , { type: 'string' , group: 'CAS', public: true });
         this.add("CAS_login_url" , '' , { type: 'string' , group: 'CAS', public: true });
+        this.add("CAS_cert_authority", '', { type: 'string', group: 'CAS', multiline: true, public: true });
 
         this.section('CAS Login Layout', function() {
             this.add("CAS_popup_width" , '810' , { type: 'string' , group: 'CAS', public: true });
@@ -29,6 +32,8 @@ function updateServices(record) {
             enabled:          RocketChat.settings.get("CAS_enabled"),
             base_url:         RocketChat.settings.get("CAS_base_url"),
             login_url:        RocketChat.settings.get("CAS_login_url"),
+            ssl_ca:           RocketChat.settings.get("CAS_cert_authority"),
+
             // Rocketchat Visuals
             buttonLabelText:  RocketChat.settings.get("CAS_button_label_text"),
             buttonLabelColor: RocketChat.settings.get("CAS_button_label_color"),
@@ -41,6 +46,32 @@ function updateServices(record) {
         // Either register or deregister the CAS login service based upon its configuration
         if( data.enabled ) {
             ServiceConfiguration.configurations.upsert({service: 'cas'}, { $set: data });
+
+            // parse out the CAS provider host details
+            var parts = data.base_url.match(/https?:\/\/([^\/]+)/);
+            var cas_host = parts[1];
+
+            // test SSL access to the CAS provider
+            test_https_access(cas_host, function(success) {
+                if (!success) {
+                    console.log('Adding the provided SSL CAs for the CAS server...');
+
+                    // capture all the PEM certs using a regex
+                    var split = data.ssl_ca.match(/(-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----)/g);
+                    // add the CAs to our global SSL options
+                    var opts = https.globalAgent.options;
+                    if (!opts.ca || !opts.ca.__injected) {
+                        opts.ca = (opts.ca||[]).concat(split);
+                    }
+
+                    // test the SSL access one more time
+                    test_https_access(cas_host, function(success) {
+                        if (!success) {
+                            console.log("Error communicating with CAS server again. CAS authentication will not work properly with the given SSL configuration.".red);
+                        }
+                    });
+                }
+            });
         } else {
             ServiceConfiguration.configurations.remove({service: 'cas'});
         }
@@ -51,6 +82,27 @@ function check_record (record) {
     if( /^CAS_.+/.test( record._id )){
         updateServices( record );
     }
+};
+
+function test_https_access(cas_host, callback) {
+    var options = {
+        host: cas_host,
+        port: 443,
+        path: '/',
+        method: 'GET'
+    };
+
+    var req = https.request(options, function(res) {
+        console.log("CAS provider is accessible.".green);
+        callback(true);
+    });
+    req.end();
+
+    req.on('error', function(err) {
+        console.log('Failed to contact the CAS provider.'.red);
+        console.log(err.toString().red);
+        callback(false);
+    });
 };
 
 RocketChat.models.Settings.find().observe({
